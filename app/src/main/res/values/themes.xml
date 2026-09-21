@@ -1,0 +1,9 @@
+<resources>
+
+    <style name="Theme.KAPClient" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <!-- Status bar color. -->
+        <item name="android:statusBarColor">#000000</item>
+        <!-- Window background color (Splash Screen). -->
+        <item name="android:windowBackground">#000000</item>
+    </style>
+</resources>
