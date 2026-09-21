@@ -5,11 +5,22 @@ set -euo pipefail
 PREFIX="${PREFIX:-/opt/kap}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SERVICE_USER="${SERVICE_USER:-kap}"
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Directory of this script — only for optional local bins / decoy / nginx example.
+# GitHub installs write straight to $PREFIX/bin and do not need a project tree.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# GitHub repo for Releases (binaries are release assets, not in the git tree).
+# Override if needed: KAP_GITHUB_REPO=other/repo
+KAP_GITHUB_REPO="${KAP_GITHUB_REPO:-UnknKriod/kap}"
+# Branch for raw.githubusercontent.com static files (decoy pages).
+KAP_GITHUB_BRANCH="${KAP_GITHUB_BRANCH:-main}"
 
 RED=$'\033[0;31m'
 GRN=$'\033[0;32m'
 YLW=$'\033[0;33m'
+CYN=$'\033[0;36m'
+BLU=$'\033[0;34m'
+BLD=$'\033[1m'
+DIM=$'\033[2m'
 NC=$'\033[0m'
 
 info()  { echo "${GRN}[+]${NC} $*"; }
@@ -24,6 +35,25 @@ need_root() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+http_get() {
+  # $1=url  $2=output path (optional — stdout if empty)
+  local url="$1" out="${2:-}"
+  if have_cmd curl; then
+    if [[ -n "$out" ]]; then
+      curl -fsSL --connect-timeout 30 --max-time 600 -o "$out" "$url"
+    else
+      curl -fsSL --connect-timeout 30 --max-time 120 "$url"
+    fi
+  elif have_cmd wget; then
+    if [[ -n "$out" ]]; then
+      wget -q -O "$out" "$url"
+    else
+      wget -q -O - "$url"
+    fi
+  else
+    die "Need curl or wget to download from GitHub"
+  fi
+}
 
 prompt() {
   # $1=question $2=default
@@ -47,7 +77,7 @@ prompt_secret() {
 choose_mode() {
   echo
   echo "Install mode:"
-  echo "  1) all-in-one  — panel + KAP server in one process (recommended)"
+  echo "  1) all-in-one  — panel + KAP server in one process (recommended for single VPS)"
   echo "  2) server-only — KAP edge node only (no panel; needs shared DB or legacy PSK)"
   echo
   local m
@@ -59,17 +89,336 @@ choose_mode() {
   esac
 }
 
-ensure_user() {
-  if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    info "Creating system user '$SERVICE_USER'"
-    useradd --system --home "$PREFIX" --shell /usr/sbin/nologin "$SERVICE_USER" || true
+# Fetch release tags (newest first). Prints one tag per line.
+# Uses GitHub API; falls back to empty list on failure.
+fetch_release_tags() {
+  local repo="$1"
+  local url="https://api.github.com/repos/${repo}/releases?per_page=20"
+  local json
+  if ! json="$(http_get "$url" 2>/dev/null)"; then
+    return 1
   fi
+  # Prefer jq if available; otherwise parse tag_name with grep/sed.
+  if have_cmd jq; then
+    printf '%s' "$json" | jq -r '.[].tag_name' 2>/dev/null
+  else
+    printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+      | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+  fi
+}
+
+# Interactive: pick a GitHub release. Prints UI on stderr; result on stdout:
+#   latest | tag:<name>
+choose_github_release() {
+  local repo
+  repo="$(resolve_github_repo)"
+  echo >&2
+  info "Fetching releases from ${CYN}https://github.com/${repo}${NC} …" >&2
+
+  local tags=()
+  local t
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    tags+=("$t")
+  done < <(fetch_release_tags "$repo" || true)
+
+  echo >&2
+  echo "${BLD}GitHub release:${NC}" >&2
+  echo "  ${GRN}1)${NC} ${BLD}latest${NC}  ${DIM}(always the newest published release)${NC}" >&2
+
+  local i=0
+  if ((${#tags[@]})); then
+    for i in "${!tags[@]}"; do
+      local num=$((i + 2))
+      local tag="${tags[$i]}"
+      if [[ $i -eq 0 ]]; then
+        echo "  ${CYN}${num})${NC} ${CYN}${tag}${NC}  ${DIM}(current top release)${NC}" >&2
+      else
+        echo "  ${BLU}${num})${NC} ${tag}" >&2
+      fi
+    done
+    echo >&2
+    local max=$((${#tags[@]} + 1))
+    local c
+    c="$(prompt "Choose 1–${max}" "1")"
+    if [[ "$c" == "1" || "$c" == "latest" ]]; then
+      echo "latest"
+      return 0
+    fi
+    if [[ "$c" =~ ^[0-9]+$ ]] && ((c >= 2 && c <= max)); then
+      echo "tag:${tags[$((c - 2))]}"
+      return 0
+    fi
+    # Allow typing a tag name directly
+    if [[ "$c" == tag:* ]]; then
+      echo "$c"
+      return 0
+    fi
+    if [[ "$c" == v* || "$c" =~ ^[0-9] ]]; then
+      echo "tag:$c"
+      return 0
+    fi
+    die "invalid choice: $c"
+  else
+    warn "Could not list releases (empty repo, rate limit, or network)." >&2
+    echo "  ${DIM}You can still type a tag name (e.g. v1.0.0) or press Enter for latest.${NC}" >&2
+    echo >&2
+    local c
+    c="$(prompt "Release tag (empty = latest)" "")"
+    if [[ -z "$c" || "$c" == "latest" || "$c" == "1" ]]; then
+      echo "latest"
+    else
+      echo "tag:${c#tag:}"
+    fi
+  fi
+}
+
+# Returns on stdout: local | latest | tag:<name>
+# Menu UI goes to stderr so $(choose_binary_source) stays clean.
+choose_binary_source() {
+  echo >&2
+  echo "${BLD}Binary source:${NC}" >&2
+  echo "  ${GRN}1)${NC} ${BLD}GitHub${NC}    — download from GitHub into $PREFIX/bin/" >&2
+  echo "  ${BLU}2)${NC} Local     — copy from ${SCRIPT_DIR}/bin/ into $PREFIX/bin/" >&2
+  echo >&2
+  local c
+  c="$(prompt "Choose 1 or 2" "1")"
+  case "$c" in
+    1|github|gh)
+      choose_github_release
+      ;;
+    2|local)
+      echo "local"
+      ;;
+    *)
+      die "invalid choice: $c"
+      ;;
+  esac
+}
+
+detect_arch() {
+  local m
+  m="$(uname -m)"
+  case "$m" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    armv7l|armhf) echo "armv7" ;;
+    *) echo "$m" ;;
+  esac
+}
+
+resolve_github_repo() {
+  echo "${KAP_GITHUB_REPO:-UnknKriod/kap}"
+}
+
+# Fetch release JSON: $1=repo  $2=latest|tag:NAME → prints JSON on stdout
+fetch_release_json() {
+  local repo="$1" spec="$2"
+  local url
+  if [[ "$spec" == "latest" ]]; then
+    url="https://api.github.com/repos/${repo}/releases/latest"
+  else
+    local tag="${spec#tag:}"
+    url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+  fi
+  info "Fetching release metadata: $url"
+  http_get "$url" || die "Failed to fetch release (check repo name, tag, and network)"
+}
+
+# List all browser_download_url values from release JSON (one per line).
+list_asset_urls() {
+  printf '%s' "$1" | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
+    | sed -E 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+}
+
+# Pick URL of a single binary asset: kap-panel-linux-amd64, kap-server-linux-arm64, …
+# $1=json  $2=logical name (kap-panel)  $3=arch (amd64)
+pick_binary_asset_url() {
+  local json="$1" name="$2" arch="$3"
+  local want="${name}-linux-${arch}"
+  local url
+  url="$(list_asset_urls "$json" | grep -F "/${want}" | head -n1 || true)"
+  if [[ -z "$url" ]]; then
+    # asset name may appear without leading slash in rare cases
+    url="$(list_asset_urls "$json" | grep -E "/${want}([^/]*)$" | head -n1 || true)"
+  fi
+  if [[ -z "$url" ]]; then
+    url="$(list_asset_urls "$json" | grep -E "${want}$" | head -n1 || true)"
+  fi
+  [[ -n "$url" ]] || return 1
+  echo "$url"
+}
+
+# Fallback: archive asset for linux+arch
+pick_archive_asset_url() {
+  local json="$1"
+  local arch
+  arch="$(detect_arch)"
+  local url
+  url="$(list_asset_urls "$json" \
+    | grep -iE 'linux' \
+    | grep -iE "${arch}|x86_64|x64" \
+    | grep -iE '\.(tar\.gz|tgz|tar\.xz|zip)$' \
+    | head -n1 || true)"
+  if [[ -z "$url" ]]; then
+    url="$(list_asset_urls "$json" \
+      | grep -iE 'linux' \
+      | grep -iE '\.(tar\.gz|tgz|tar\.xz|zip)$' \
+      | head -n1 || true)"
+  fi
+  [[ -n "$url" ]] || return 1
+  echo "$url"
+}
+
+# Download from GitHub Releases straight into $PREFIX/bin/.
+# Prefers individual assets named kap-<component>-linux-<arch>
+# (e.g. kap-panel-linux-amd64). Falls back to a linux archive.
+# Clients are never installed on the server.
+# $1 = spec (latest | tag:vX.Y.Z)
+# $2+ = required binary names (e.g. kap-panel kap-server)
+download_github_release() {
+  local spec="$1"
+  shift
+  local required=("$@")
+  ((${#required[@]})) || required=(kap-server)
+
+  local repo arch dest_dir
+  repo="$(resolve_github_repo)"
+  arch="$(detect_arch)"
+  dest_dir="$PREFIX/bin"
+  info "GitHub repo: https://github.com/${repo} (arch=${arch})"
+  info "Install target: $dest_dir"
+
+  local json
+  json="$(fetch_release_json "$repo" "$spec")"
+  local tag_name
+  tag_name="$(printf '%s' "$json" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
+  [[ -n "$tag_name" ]] && info "Release: $tag_name"
+
+  mkdir -p "$dest_dir"
+  local b copied=0 url dest
+
+  # 1) Prefer per-binary assets: kap-panel-linux-amd64, …
+  for b in "${required[@]}"; do
+    if url="$(pick_binary_asset_url "$json" "$b" "$arch")"; then
+      dest="$dest_dir/$b"
+      info "Downloading $b ← $url"
+      http_get "$url" "$dest" || die "Download failed: $url"
+      chmod +x "$dest"
+      info "Installed $b → $dest"
+      copied=1
+    else
+      warn "No asset ${b}-linux-${arch} in release"
+    fi
+  done
+
+  # 2) Fallback: one archive for anything still missing
+  local still=()
+  for b in "${required[@]}"; do
+    [[ -f "$dest_dir/$b" ]] || still+=("$b")
+  done
+
+  if ((${#still[@]})); then
+    warn "Missing after direct assets: ${still[*]} — trying archive fallback"
+    have_cmd tar || die "tar is required to extract a release archive"
+    if ! url="$(pick_archive_asset_url "$json")"; then
+      die "No suitable binaries or linux archive for arch ${arch}.
+Attach files like kap-panel-linux-${arch} / kap-server-linux-${arch} to
+https://github.com/${repo}/releases, or install from local binaries."
+    fi
+    info "Downloading archive: $url"
+    local tmp archive extract
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+    archive="$tmp/release.archive"
+    http_get "$url" "$archive" || die "Download failed"
+    extract="$tmp/extract"
+    mkdir -p "$extract"
+    case "$url" in
+      *.zip)
+        have_cmd unzip || die "unzip required for .zip releases"
+        unzip -q "$archive" -d "$extract"
+        ;;
+      *.tar.xz) tar -xJf "$archive" -C "$extract" ;;
+      *) tar -xzf "$archive" -C "$extract" ;;
+    esac
+
+    local bin_src sub
+    if [[ -d "$extract/bin" ]]; then
+      bin_src="$extract/bin"
+    else
+      bin_src="$(find "$extract" -type d -name bin 2>/dev/null | head -n1 || true)"
+    fi
+    if [[ -z "$bin_src" || ! -d "$bin_src" ]]; then
+      bin_src="$extract"
+      sub="$(find "$extract" -maxdepth 3 -type f \( -name 'kap-server*' -o -name 'kap-panel*' \) 2>/dev/null | head -n1 || true)"
+      [[ -n "$sub" ]] && bin_src="$(dirname "$sub")"
+    fi
+
+    for b in "${still[@]}"; do
+      if [[ -f "$bin_src/$b" ]]; then
+        install -m 755 "$bin_src/$b" "$dest_dir/$b"
+        info "Installed $b → $dest_dir/$b (from archive)"
+        copied=1
+      elif [[ -f "$bin_src/${b}-linux-${arch}" ]]; then
+        install -m 755 "$bin_src/${b}-linux-${arch}" "$dest_dir/$b"
+        info "Installed $b → $dest_dir/$b (from archive ${b}-linux-${arch})"
+        copied=1
+      else
+        warn "Required binary not in archive: $b"
+      fi
+    done
+
+    local decoy_src
+    decoy_src="$(find "$extract" -type d -name decoy 2>/dev/null | head -n1 || true)"
+    if [[ -n "$decoy_src" && -d "$decoy_src" ]]; then
+      mkdir -p "$PREFIX/decoy"
+      cp -a "$decoy_src/." "$PREFIX/decoy/"
+      info "Updated decoy/ → $PREFIX/decoy"
+    fi
+  fi
+
+  ((copied)) || die "Could not obtain required binaries: ${required[*]}"
+  info "Binaries ready in $dest_dir"
+  ls -la "$dest_dir" 2>/dev/null || true
+}
+
+# Copy local release binaries into $PREFIX/bin.
+# Looks in $SCRIPT_DIR/bin, then $SCRIPT_DIR (flat names or *-linux-<arch>).
+install_local_binaries() {
+  local required=("$@")
+  local src_dir="" b src arch
+  arch="$(detect_arch)"
+  if [[ -d "$SCRIPT_DIR/bin" ]]; then
+    src_dir="$SCRIPT_DIR/bin"
+  elif [[ -f "$SCRIPT_DIR/kap-server" || -f "$SCRIPT_DIR/kap-panel" \
+      || -f "$SCRIPT_DIR/kap-server-linux-${arch}" || -f "$SCRIPT_DIR/kap-panel-linux-${arch}" ]]; then
+    src_dir="$SCRIPT_DIR"
+  else
+    die "Local binaries not found under $SCRIPT_DIR.
+Place kap-panel / kap-server (or *-linux-${arch}) next to the installer or in bin/, 
+or choose GitHub download."
+  fi
+  mkdir -p "$PREFIX/bin"
+  for b in "${required[@]}"; do
+    src=""
+    if [[ -f "$src_dir/$b" ]]; then
+      src="$src_dir/$b"
+    elif [[ -f "$src_dir/${b}-linux-${arch}" ]]; then
+      src="$src_dir/${b}-linux-${arch}"
+    fi
+    [[ -n "$src" ]] || die "Missing local binary: $b (looked in $src_dir)"
+    install -m 755 "$src" "$PREFIX/bin/$b"
+    info "Copied $b → $PREFIX/bin/$b"
+  done
 }
 
 list_existing_bins() {
   local missing=()
   for b in "$@"; do
-    if [[ ! -x "$REPO_ROOT/bin/$b" && ! -f "$REPO_ROOT/bin/$b" ]]; then
+    if [[ ! -f "$PREFIX/bin/$b" ]]; then
       missing+=("$b")
     fi
   done
@@ -80,7 +429,7 @@ list_existing_bins() {
   return 0
 }
 
-# Ensure required prebuilt binaries exist (no compile-from-source).
+# Fetch or copy required binaries directly into $PREFIX/bin.
 # $1 = mode (all|server)
 prepare_binaries() {
   local mode="$1"
@@ -89,38 +438,146 @@ prepare_binaries() {
     required=(kap-panel kap-server)
   fi
 
+  mkdir -p "$PREFIX"/{bin,data,decoy,etc}
+
+  local source
+  source="$(choose_binary_source)"
+
+  case "$source" in
+    local)
+      install_local_binaries "${required[@]}"
+      ;;
+    latest|tag:*)
+      download_github_release "$source" "${required[@]}"
+      ;;
+    *) die "unknown binary source: $source" ;;
+  esac
+
   local miss
   if ! miss="$(list_existing_bins "${required[@]}")"; then
-    die "Missing binaries in $REPO_ROOT/bin/: $miss
-Place release binaries there, for example:
-  bin/kap-panel
-  bin/kap-server
-Then run this installer again."
+    die "Missing binaries in $PREFIX/bin/: $miss
+
+Options:
+  • Local: put kap-panel / kap-server next to the installer (or in bin/) and choose source 2
+  • GitHub: choose source 1 — assets kap-*-linux-<arch> on
+    https://github.com/UnknKriod/kap/releases"
   fi
-  chmod +x "$REPO_ROOT/bin/"* 2>/dev/null || true
-  info "Using binaries from $REPO_ROOT/bin/ (${required[*]})"
-  ls -la "$REPO_ROOT/bin/" 2>/dev/null || true
+  chmod +x "$PREFIX/bin/"* 2>/dev/null || true
+  info "Using binaries in $PREFIX/bin/ (${required[*]})"
+  ls -la "$PREFIX/bin/" 2>/dev/null || true
 }
 
+ensure_user() {
+  if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    info "Creating system user '$SERVICE_USER'"
+    useradd --system --home "$PREFIX" --shell /usr/sbin/nologin "$SERVICE_USER" || true
+  fi
+}
+
+# Download decoy HTML pages as individual files from raw.githubusercontent.com.
+# Does not use archives. Skips files that already exist under $PREFIX/decoy
+# unless FORCE_DECOY=1.
+download_decoy_pages() {
+  local repo branch base dest rel path url
+  repo="$(resolve_github_repo)"
+  branch="${KAP_GITHUB_BRANCH:-main}"
+  base="https://raw.githubusercontent.com/${repo}/${branch}/decoy"
+  dest="$PREFIX/decoy"
+
+  # Relative paths under decoy/
+  local files=(
+    default/index.html
+    cdn-status/index.html
+  )
+
+  mkdir -p "$dest"
+  info "Fetching decoy pages from ${CYN}${base}/${NC} …"
+
+  local ok=0 fail=0
+  for rel in "${files[@]}"; do
+    path="$dest/$rel"
+    if [[ -f "$path" && "${FORCE_DECOY:-0}" != "1" ]]; then
+      info "decoy/$rel already present — skip"
+      ok=$((ok + 1))
+      continue
+    fi
+    mkdir -p "$(dirname "$path")"
+    url="${base}/${rel}"
+    if http_get "$url" "$path"; then
+      # Reject obvious GitHub 404 HTML bodies saved as "success" without -f on some tools
+      if [[ -s "$path" ]] && ! grep -q '404: Not Found' "$path" 2>/dev/null; then
+        chmod 644 "$path" 2>/dev/null || true
+        info "decoy/$rel OK"
+        ok=$((ok + 1))
+      else
+        rm -f "$path"
+        warn "decoy/$rel empty or not found at $url"
+        fail=$((fail + 1))
+      fi
+    else
+      warn "decoy/$rel download failed: $url"
+      fail=$((fail + 1))
+    fi
+  done
+
+  if ((ok == 0)); then
+    warn "No decoy pages installed — server will use minimal stubs (check branch ${branch} and that decoy/ is in the repo)"
+  else
+    info "Decoy ready in $dest ($ok file(s)${fail:+, $fail failed})"
+  fi
+}
+
+# Download deploy/nginx.conf.example from raw.githubusercontent.com into $PREFIX/share/.
+download_nginx_example() {
+  local repo branch url dest
+  repo="$(resolve_github_repo)"
+  branch="${KAP_GITHUB_BRANCH:-main}"
+  dest="$PREFIX/share/nginx.conf.example"
+  mkdir -p "$PREFIX/share"
+
+  # Prefer local copy next to the installer
+  if [[ -f "$SCRIPT_DIR/nginx.conf.example" ]]; then
+    install -m 644 "$SCRIPT_DIR/nginx.conf.example" "$dest"
+    info "nginx.conf.example ← local"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/deploy/nginx.conf.example" ]]; then
+    install -m 644 "$SCRIPT_DIR/deploy/nginx.conf.example" "$dest"
+    info "nginx.conf.example ← local deploy/"
+    return 0
+  fi
+
+  if [[ -f "$dest" && "${FORCE_NGINX_EXAMPLE:-0}" != "1" ]]; then
+    info "nginx.conf.example already present — skip"
+    return 0
+  fi
+
+  url="https://raw.githubusercontent.com/${repo}/${branch}/deploy/nginx.conf.example"
+  info "Fetching nginx.conf.example from ${CYN}${url}${NC} …"
+  if http_get "$url" "$dest" && [[ -s "$dest" ]] && ! grep -q '404: Not Found' "$dest" 2>/dev/null; then
+    chmod 644 "$dest" 2>/dev/null || true
+    info "nginx.conf.example → $dest"
+  else
+    rm -f "$dest"
+    warn "nginx.conf.example download failed (optional reference file)"
+  fi
+}
+
+# Shared assets (decoy, nginx example) + ownership. Binaries already in $PREFIX/bin.
 install_files() {
   local mode="$1"
-  info "Installing into $PREFIX"
-  mkdir -p "$PREFIX"/{bin,data,decoy,etc}
-  if [[ "$mode" == "all" ]]; then
-    install -m 755 "$REPO_ROOT/bin/kap-panel" "$PREFIX/bin/kap-panel"
-  fi
-  install -m 755 "$REPO_ROOT/bin/kap-server" "$PREFIX/bin/kap-server"
+  info "Finalizing install under $PREFIX"
+  mkdir -p "$PREFIX"/{bin,data,decoy,etc,share}
 
-  # decoy assets
-  if [[ -d "$REPO_ROOT/decoy" ]]; then
-    cp -a "$REPO_ROOT/decoy/." "$PREFIX/decoy/"
+  # 1) Local decoy next to the installer (optional)
+  if [[ -d "$SCRIPT_DIR/decoy" ]]; then
+    cp -a "$SCRIPT_DIR/decoy/." "$PREFIX/decoy/"
+    info "Copied local decoy/ → $PREFIX/decoy"
   fi
 
-  # nginx example
-  mkdir -p "$PREFIX/share"
-  if [[ -f "$REPO_ROOT/deploy/nginx.conf.example" ]]; then
-    install -m 644 "$REPO_ROOT/deploy/nginx.conf.example" "$PREFIX/share/nginx.conf.example"
-  fi
+  # 2) Fill/refresh from GitHub raw (individual files, not an archive)
+  download_decoy_pages
+  download_nginx_example
 
   chown -R "$SERVICE_USER:$SERVICE_USER" "$PREFIX"
 }
