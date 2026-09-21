@@ -2,8 +2,13 @@ KAP Software License
 Copyright (c) 2026 UnknKriod
 
 1. Definitions
-   "Software" means the KAP binaries and accompanying materials
-   distributed by the copyright holder.
+   "Software" means the KAP server, panel, and desktop client binaries
+   (kap-panel, kap-server, kap-client, kap-client-gui) and related
+   materials distributed by the copyright holder in releases.
+   "Repository Materials" means source and files published in the
+   public git repository (including the Android client, deploy scripts,
+   and decoy pages), which may be used and improved via pull requests
+   under the same commercial attribution rules where applicable.
    "Commercial use" means use of the Software in connection with any
    activity intended for commercial advantage or monetary compensation
    (including selling access, hosting paid services, reselling, or
@@ -28,9 +33,12 @@ Copyright (c) 2026 UnknKriod
    - redistribute modified binaries under the name "KAP" without
      permission (forks/rebrands need a different name).
 
-5. No source code
-   Source code is not provided. This license does not grant any right
-   to receive source code.
+5. Source code availability
+   Source code for the Software (server, panel, desktop clients) is
+   not provided and this license does not grant any right to receive it.
+   Repository Materials are published in the public repository for
+   transparency and contribution; they are not a grant of rights to the
+   closed Software source.
 
 6. Disclaimer
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
