@@ -1,0 +1,42 @@
+KAP Software License
+Copyright (c) 2026 UnknKriod
+
+1. Definitions
+   "Software" means the KAP binaries and accompanying materials
+   distributed by the copyright holder.
+   "Commercial use" means use of the Software in connection with any
+   activity intended for commercial advantage or monetary compensation
+   (including selling access, hosting paid services, reselling, or
+   bundling the Software in a paid product).
+
+2. Personal / non-commercial use
+   You may install and use the Software free of charge for personal,
+   educational, or other non-commercial purposes without attribution.
+
+3. Commercial use
+   Commercial use is permitted only if you include clear attribution
+   in a place reasonably visible to end users (website, panel, app
+   about screen, documentation, or marketing materials), containing:
+     - the name "KAP"
+     - a working link to the project page: https://github.com/UnknKriod/kap
+   Example: "Powered by KAP — https://github.com/UnknKriod/kap"
+
+4. Restrictions
+   You may not:
+   - claim authorship of the Software;
+   - remove or alter copyright notices included with the Software;
+   - redistribute modified binaries under the name "KAP" without
+     permission (forks/rebrands need a different name).
+
+5. No source code
+   Source code is not provided. This license does not grant any right
+   to receive source code.
+
+6. Disclaimer
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+   THE COPYRIGHT HOLDER IS NOT LIABLE FOR ANY DAMAGES ARISING FROM
+   USE OF THE SOFTWARE.
+
+7. Termination
+   Failure to comply with attribution requirements for commercial use
+   terminates the rights granted under section 3.
