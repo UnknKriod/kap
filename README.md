@@ -205,6 +205,36 @@ https://панель-домен/kap-panel/<путь>/<токен>
 
 ---
 
+## Скриншоты
+
+### Android
+
+| Нет выбранных серверов | Работает | Маршрутизация |
+|:--------:|:----------------------:|:-------------:|
+| <img src="doc/screenshots/no-servers-selected.jpg" width="200" alt="Android: серверы не выбраны" /> | <img src="doc/screenshots/working.jpg" width="200" alt="Android: подключено" /> | <img src="doc/screenshots/routing.jpg" width="200" alt="Android: маршрутизация" /> |
+
+| Split-tunneling | До автопереключения | После автопереключения |
+|:---------------:|:-------------------:|:----------------------:|
+| <img src="doc/screenshots/split-tunneling.jpg" width="200" alt="Android: split-tunneling" /> | <img src="doc/screenshots/before-auto-switch.jpg" width="200" alt="Android: до автопереключения" /> | <img src="doc/screenshots/after-auto-switch.jpg" width="200" alt="Android: после автопереключения" /> |
+
+| Нужно обновить БД | Обновление БД |
+|:-----------------:|:-------------:|
+| <img src="doc/screenshots/need-to-db-update.jpg" width="200" alt="Android: требуется обновление БД" /> | <img src="doc/screenshots/db-updating.jpg" width="200" alt="Android: обновление БД" /> |
+
+### Desktop (GUI)
+
+| Главный экран | Маршрутизация |
+|:-------------:|:-------------:|
+| <img src="doc/screenshots/desktop-main-screen.png" width="420" alt="Desktop: главный экран" /> | <img src="doc/screenshots/desktop-routing.png" width="420" alt="Desktop: маршрутизация" /> |
+
+### Панель
+
+| Главный экран |
+|:-------------:|
+| <img src="doc/screenshots/panel-main-screen.png" alt="Панель: главный экран" /> |
+
+---
+
 ## Частые вопросы
 
 ### Панель открывается, клиент не коннектится
